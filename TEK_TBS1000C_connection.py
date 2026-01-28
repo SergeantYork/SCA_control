@@ -5,8 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Configuration
-NUM_POINTS = 2500  # Number of points to capture per trace (max 10000 for TBS1000C)
-NUM_TRACES = 100  # Number of traces to capture
+NUM_POINTS = 601  # Number of points to capture per trace (max 10000 for TBS1000C)
+NUM_TRACES = 20  # Number of traces to capture
 TRIGGER_CHANNEL = 2  # Trigger on channel 2
 TRIGGER_LEVEL = 1.5  # Trigger level in volts
 TRIGGER_SLOPE = 'RISE'  # Trigger on rising edge ('RISE' or 'FALL')
@@ -47,8 +47,11 @@ def connect_to_tektronix():
         print(f"Connecting to: {tek_device}")
         scope = rm.open_resource(tek_device)
 
-        # Set timeout (in milliseconds)
-        scope.timeout = 5000
+        # Set timeout (in milliseconds) - reduce for faster operations
+        scope.timeout = 2000
+
+        # Disable headers in responses for faster parsing
+        scope.write('HEADer OFF')
 
         # Query identification
         idn = scope.query('*IDN?')
@@ -90,7 +93,7 @@ def wait_for_trigger(scope, timeout=10):
     return False
 
 
-def get_waveform(scope, channel=1, num_points=None):
+def get_waveform(scope, channel=1, num_points=None, preamble_cache=None):
     """
     Get waveform data from the oscilloscope
 
@@ -98,32 +101,38 @@ def get_waveform(scope, channel=1, num_points=None):
         scope: PyVISA instrument object
         channel: Channel number (1-4)
         num_points: Number of points to capture (None=all available, or specify value like 1000, 2500, 10000)
+        preamble_cache: Cached preamble data to skip re-querying (for speed)
 
     Returns:
         time_data: numpy array of time values
         voltage_data: numpy array of voltage values
+        preamble_data: dict with preamble info (for caching)
     """
     try:
-        # Set data source to the specified channel
-        scope.write(f'DATa:SOUrce CH{channel}')
+        # Only set data parameters if not already set (first call)
+        if preamble_cache is None:
+            # Set data source to the specified channel
+            scope.write(f'DATa:SOUrce CH{channel}')
 
-        # Set record length if specified
-        if num_points is not None:
-            scope.write(f'DATa:STARt 1')
-            scope.write(f'DATa:STOP {num_points}')
+            # Set record length if specified
+            if num_points is not None:
+                scope.write(f'DATa:STARt 1')
+                scope.write(f'DATa:STOP {num_points}')
+            else:
+                # Get all available points
+                scope.write('DATa:STARt 1')
+                scope.write('DATa:STOP 10000')  # Max available on TBS1000C
+
+            # Set data encoding to binary
+            scope.write('DATa:ENCdg RPBinary')
+
+            # Set data width to 2 bytes
+            scope.write('DATa:WIDth 2')
+
+            # Get waveform preamble (scaling information)
+            preamble = scope.query('WFMOutpre?').split(';')
         else:
-            # Get all available points
-            scope.write('DATa:STARt 1')
-            scope.write('DATa:STOP 10000')  # Max available on TBS1000C
-
-        # Set data encoding to binary
-        scope.write('DATa:ENCdg RPBinary')
-
-        # Set data width to 2 bytes
-        scope.write('DATa:WIDth 2')
-
-        # Get waveform preamble (scaling information)
-        preamble = scope.query('WFMOutpre?').split(';')
+            preamble = preamble_cache
 
         # Extract scaling factors
         # Format: BYT_NR;BIT_NR;ENCDG;BN_FMT;BYT_OR;WFID;NR_PT;PT_FMT;XUNIT;XINCR;XZERO;PT_OFF;YUNIT;YMULT;YOFF;YZERO
@@ -151,11 +160,11 @@ def get_waveform(scope, channel=1, num_points=None):
         # Generate time array
         time_data = np.arange(0, points) * xincr + xzero
 
-        return time_data, voltage_data
+        return time_data, voltage_data, preamble
 
     except Exception as e:
         print(f"Error getting waveform: {e}")
-        return None, None
+        return None, None, None
 
 
 def setup_trigger(scope, channel, level, slope='RISE'):
@@ -213,31 +222,37 @@ if __name__ == "__main__":
 
         all_traces = []
         time_data = None
+        preamble_cache = None  # Cache preamble to avoid re-querying
+
+        import time
+        start_time = time.time()
 
         for i in range(NUM_TRACES):
             # Wait for trigger event
-            print(f"Waiting for trigger {i + 1}/{NUM_TRACES}...", end='', flush=True)
             if wait_for_trigger(scope, timeout=30):
-                print(" Triggered!", end='')
-
-                # Get waveform from channel 1
-                t_data, v_data = get_waveform(scope, channel=1, num_points=NUM_POINTS)
+                # Get waveform from channel 1 (use cached preamble after first capture)
+                t_data, v_data, preamble = get_waveform(scope, channel=1, num_points=NUM_POINTS, preamble_cache=preamble_cache)
 
                 if t_data is not None and v_data is not None:
                     if time_data is None:
                         time_data = t_data  # Store time data once (same for all traces)
+                        preamble_cache = preamble  # Cache preamble for subsequent captures
                     all_traces.append(v_data)
-                    print(f" Captured!")
 
                     # Print progress every 10 traces
                     if (i + 1) % 10 == 0:
-                        print(f"Progress: {i + 1}/{NUM_TRACES} traces captured")
+                        elapsed = time.time() - start_time
+                        rate = (i + 1) / elapsed
+                        print(f"Progress: {i + 1}/{NUM_TRACES} traces ({rate:.1f} traces/sec)")
                 else:
-                    print(f" Error capturing trace {i + 1}")
+                    print(f"Error capturing trace {i + 1}")
                     break
             else:
-                print(f" Timeout! No trigger received for trace {i + 1}")
+                print(f"Timeout! No trigger received for trace {i + 1}")
                 break
+
+        elapsed = time.time() - start_time
+        print(f"\nCapture took {elapsed:.2f} seconds ({len(all_traces)/elapsed:.1f} traces/sec)")
 
         print(f"\nCapture complete! Successfully captured {len(all_traces)} traces")
 
