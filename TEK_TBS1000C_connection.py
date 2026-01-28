@@ -4,6 +4,13 @@ import warnings
 import numpy as np
 import matplotlib.pyplot as plt
 
+# Configuration
+NUM_POINTS = 2500  # Number of points to capture per trace (max 10000 for TBS1000C)
+NUM_TRACES = 100  # Number of traces to capture
+TRIGGER_CHANNEL = 2  # Trigger on channel 2
+TRIGGER_LEVEL = 1.5  # Trigger level in volts
+TRIGGER_SLOPE = 'RISE'  # Trigger on rising edge ('RISE' or 'FALL')
+
 def connect_to_tektronix():
     """
     Connect to Tektronix TBS 1000C oscilloscope via USB
@@ -54,13 +61,43 @@ def connect_to_tektronix():
         return None
 
 
-def get_waveform(scope, channel=1):
+def wait_for_trigger(scope, timeout=10):
+    """
+    Wait for the oscilloscope to trigger and acquire data
+
+    Args:
+        scope: PyVISA instrument object
+        timeout: Maximum time to wait in seconds
+
+    Returns:
+        True if triggered, False if timeout
+    """
+    import time
+
+    # Start acquisition (single sequence)
+    scope.write('ACQuire:STATE RUN')
+    scope.write('ACQuire:STOPAfter SEQUENCE')
+
+    # Wait for trigger and acquisition to complete
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        # Check if acquisition is complete
+        state = scope.query('ACQuire:STATE?').strip()
+        if state == '0':  # Acquisition stopped (triggered and captured)
+            return True
+        time.sleep(0.01)  # Small delay to avoid hammering the scope
+
+    return False
+
+
+def get_waveform(scope, channel=1, num_points=None):
     """
     Get waveform data from the oscilloscope
 
     Args:
         scope: PyVISA instrument object
         channel: Channel number (1-4)
+        num_points: Number of points to capture (None=all available, or specify value like 1000, 2500, 10000)
 
     Returns:
         time_data: numpy array of time values
@@ -69,6 +106,15 @@ def get_waveform(scope, channel=1):
     try:
         # Set data source to the specified channel
         scope.write(f'DATa:SOUrce CH{channel}')
+
+        # Set record length if specified
+        if num_points is not None:
+            scope.write(f'DATa:STARt 1')
+            scope.write(f'DATa:STOP {num_points}')
+        else:
+            # Get all available points
+            scope.write('DATa:STARt 1')
+            scope.write('DATa:STOP 10000')  # Max available on TBS1000C
 
         # Set data encoding to binary
         scope.write('DATa:ENCdg RPBinary')
@@ -112,6 +158,38 @@ def get_waveform(scope, channel=1):
         return None, None
 
 
+def setup_trigger(scope, channel, level, slope='RISE'):
+    """
+    Setup edge trigger on specified channel
+
+    Args:
+        scope: PyVISA instrument object
+        channel: Channel number to trigger on (1-4)
+        level: Trigger level in volts
+        slope: Trigger slope ('RISE' or 'FALL')
+    """
+    try:
+        # Set trigger type to edge
+        scope.write('TRIGger:A:TYPE EDGE')
+
+        # Set trigger source
+        scope.write(f'TRIGger:A:EDGE:SOUrce CH{channel}')
+
+        # Set trigger level
+        scope.write(f'TRIGger:A:LEVel:CH{channel} {level}')
+
+        # Set trigger slope
+        scope.write(f'TRIGger:A:EDGE:SLOpe {slope}')
+
+        # Set trigger mode to normal (wait for trigger)
+        scope.write('TRIGger:A:MODe NORMAL')
+
+        print(f"Trigger set: CH{channel}, {level}V, {slope} edge")
+
+    except Exception as e:
+        print(f"Error setting up trigger: {e}")
+
+
 if __name__ == "__main__":
     # Suppress the asyncio cleanup warning
     warnings.filterwarnings('ignore', category=ResourceWarning)
@@ -126,21 +204,66 @@ if __name__ == "__main__":
         print(f"Vertical scale CH1: {scope.query('CH1:SCAle?').strip()}")
         print(f"Horizontal scale: {scope.query('HORizontal:SCAle?').strip()}")
 
-        # Get waveform from channel 1
-        print("\nCapturing waveform from CH1...")
-        time_data, voltage_data = get_waveform(scope, channel=1)
+        # Setup trigger
+        setup_trigger(scope, TRIGGER_CHANNEL, TRIGGER_LEVEL, TRIGGER_SLOPE)
 
-        if time_data is not None and voltage_data is not None:
-            print(f"Captured {len(voltage_data)} points")
+        # Step 1: Capture all traces (each trace waits for a trigger)
+        print(f"\nCapturing {NUM_TRACES} traces from CH1 ({NUM_POINTS} points each)...")
+        print(f"Waiting for trigger on CH{TRIGGER_CHANNEL} at {TRIGGER_LEVEL}V {TRIGGER_SLOPE}...")
 
-            # Plot the waveform
-            plt.figure(figsize=(10, 6))
-            plt.plot(time_data * 1e6, voltage_data)  # Convert time to microseconds
+        all_traces = []
+        time_data = None
+
+        for i in range(NUM_TRACES):
+            # Wait for trigger event
+            print(f"Waiting for trigger {i + 1}/{NUM_TRACES}...", end='', flush=True)
+            if wait_for_trigger(scope, timeout=30):
+                print(" Triggered!", end='')
+
+                # Get waveform from channel 1
+                t_data, v_data = get_waveform(scope, channel=1, num_points=NUM_POINTS)
+
+                if t_data is not None and v_data is not None:
+                    if time_data is None:
+                        time_data = t_data  # Store time data once (same for all traces)
+                    all_traces.append(v_data)
+                    print(f" Captured!")
+
+                    # Print progress every 10 traces
+                    if (i + 1) % 10 == 0:
+                        print(f"Progress: {i + 1}/{NUM_TRACES} traces captured")
+                else:
+                    print(f" Error capturing trace {i + 1}")
+                    break
+            else:
+                print(f" Timeout! No trigger received for trace {i + 1}")
+                break
+
+        print(f"\nCapture complete! Successfully captured {len(all_traces)} traces")
+
+        # Step 2: Save the data
+        if len(all_traces) > 0 and time_data is not None:
+            # Convert to numpy array for easier handling
+            traces_array = np.array(all_traces)
+            print(f"Data shape: {traces_array.shape} (traces x points)")
+
+            # Save to file
+            np.savez('oscilloscope_traces.npz', time=time_data, traces=traces_array)
+            print("Data saved to 'oscilloscope_traces.npz'")
+
+            # Step 3: Plot all traces overlaid
+            print("\nPlotting all traces...")
+            plt.figure(figsize=(12, 8))
+            for i, voltage_data in enumerate(all_traces):
+                plt.plot(time_data * 1e6, voltage_data, alpha=0.3, linewidth=0.5)
+
             plt.xlabel('Time (µs)')
             plt.ylabel('Voltage (V)')
-            plt.title('Oscilloscope Trace - Channel 1')
+            plt.title(f'{len(all_traces)} Overlaid Oscilloscope Traces - Channel 1')
             plt.grid(True)
             plt.show()
+        else:
+            print("No traces captured successfully")
 
         # Close connection when done
         scope.close()
