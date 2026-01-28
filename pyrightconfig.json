@@ -1,0 +1,13 @@
+{
+  "venvPath": "/home/roee/Documents/sca_CONTROL/SCA_control",
+  "venv": "venv",
+  "pythonVersion": "3.12",
+  "include": [
+    "**/*.py"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "**/node_modules",
+    "venv"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "python.defaultInterpreterPath": "/home/roee/Documents/sca_CONTROL/SCA_control/venv/bin/python",
+  "python.analysis.extraPaths": [
+    "/home/roee/Documents/sca_CONTROL/SCA_control/venv/lib/python3.12/site-packages"
+  ],
+  "python.analysis.autoImportCompletions": true,
+  "python.analysis.typeCheckingMode": "basic",
+  "basedpyright.analysis.extraPaths": [
+    "/home/roee/Documents/sca_CONTROL/SCA_control/venv/lib/python3.12/site-packages"
+  ],
+  "basedpyright.analysis.typeCheckingMode": "basic"
+}
